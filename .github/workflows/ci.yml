@@ -1,0 +1,22 @@
+name: macOS checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure development build
+        run: python3 scripts/configure.py
+      - name: Test
+        run: xcrun swift test
+      - name: Package development app
+        run: ./scripts/build.sh
+      - name: Check package
+        run: |
+          codesign --verify --deep --strict 'dist/WES·MACLEAN.app'
+          test ! -e 'dist/WES·MACLEAN.app/Contents/Library/LaunchServices/local.wesp.MacleanHelper'
+          'dist/WES·MACLEAN.app/Contents/MacOS/Lime' --diagnose

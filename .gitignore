@@ -1,0 +1,12 @@
+.DS_Store
+.build/
+.swiftpm/
+dist/
+Sources/MacleanShared/SignerIdentity.swift
+HelperSupport/Info.plist
+*.p12
+*.pfx
+*.key
+*.mobileprovision
+.env
+.env.*
