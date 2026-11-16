@@ -135,12 +135,12 @@ struct UninstallView: View {
                                     VStack(alignment: .leading, spacing: 3) { Text(app.name).font(.system(size: 13, weight: .medium)); Text(app.url.path).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle) }
                                     Spacer()
                                     if app.isRunning { Text("运行中").font(.caption).foregroundStyle(.secondary) }
-                                    Text(bytes(app.sizeBytes)).font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                                    Text(storageBytes(app.sizeBytes)).font(.caption).monospacedDigit().foregroundStyle(.secondary)
                                     Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
                                 }.padding(12).card()
                             }.buttonStyle(.plain).disabled(model.busy)
                         }
-                        IssuesView(issues: model.issues)
+                        IssuesView(issues: model.issues, continueInFinder: model.continueUninstallInFinder)
                     }
                 }
             }
@@ -162,7 +162,7 @@ struct JunkView: View {
                 Spacer(); Image(systemName: "sparkles").font(.system(size: 42, weight: .ultraLight)).foregroundStyle(lime)
                 Text("扫描待清理项目").font(.title3)
                 Text("缓存会随应用使用再次生成").font(.caption).foregroundStyle(.secondary); Spacer()
-                IssuesView(issues: model.issues)
+                IssuesView(issues: model.issues, continueInFinder: model.continueUninstallInFinder)
             } else { CandidateList(model: model) }
         }.padding(.horizontal, 28).padding(.bottom, 18)
     }
@@ -179,17 +179,17 @@ struct CandidateList: View {
                             VStack(alignment: .leading, spacing: 4) { Text(item.displayName).font(.system(size: 12, weight: .medium)); Text(item.url.path).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle) }
                             Spacer()
                             Text(item.category.rawValue).font(.caption2).foregroundStyle(item.category == .support ? .orange : .secondary)
-                            Text(bytes(item.sizeBytes)).font(.caption).monospacedDigit().frame(minWidth: 58, alignment: .trailing)
+                            Text(storageBytes(item.sizeBytes)).font(.caption).monospacedDigit().frame(minWidth: 58, alignment: .trailing)
                             Button { NSWorkspace.shared.activateFileViewerSelecting([item.url]) } label: { Image(systemName: "magnifyingglass") }.buttonStyle(.borderless).help("在 Finder 查看")
                         }.padding(12).card()
                     }
-                    IssuesView(issues: model.issues)
+                    IssuesView(issues: model.issues, continueInFinder: model.continueUninstallInFinder)
                 }
             }
             HStack {
                 Button("取消全选") { model.selection = [] }.disabled(model.busy)
                 Spacer()
-                Text("\(model.selection.count) 项 · \(bytes(model.selectedBytes))").font(.caption).monospacedDigit()
+                Text("\(model.selection.count) 项 · \(storageBytes(model.selectedBytes))").font(.caption).monospacedDigit()
                 Button("移入废纸篓") { model.trashSelected() }.buttonStyle(.borderedProminent).disabled(model.busy || model.selection.isEmpty)
             }.padding(.top, 8)
         }
@@ -197,10 +197,22 @@ struct CandidateList: View {
 }
 struct IssuesView: View {
     let issues: [CleanupIssue]
+    var continueInFinder: ((URL) -> Void)? = nil
+    @State private var expanded = true
     var body: some View {
         if !issues.isEmpty {
-            DisclosureGroup("\(issues.count) 项提示") {
-                ForEach(issues) { issue in VStack(alignment: .leading, spacing: 3) { Text(issue.reason); Text(issue.path).foregroundStyle(.secondary).textSelection(.enabled) }.font(.caption).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4) }
+            DisclosureGroup("\(issues.count) 项提示", isExpanded: $expanded) {
+                ForEach(issues) { issue in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(issue.reason)
+                        Text(issue.path).foregroundStyle(.secondary).textSelection(.enabled)
+                        if let url = issue.recoveryURL, let continueInFinder {
+                            Text("在 Finder 按 ⌘⌫，按系统提示授权。")
+                                .foregroundStyle(.secondary)
+                            Button("在 Finder 中继续") { continueInFinder(url) }
+                        }
+                    }.font(.caption).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4)
+                }
             }.font(.caption).padding(12)
         }
     }

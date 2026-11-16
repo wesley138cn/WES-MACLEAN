@@ -52,6 +52,41 @@ final class CleanupEngineTests: XCTestCase {
         XCTAssertEqual(junk.candidates.first(where: { $0.url.path == unrelated.path })?.selectedByDefault, false)
     }
 
+    func testFrameworkLinksDoNotHideBundlePayloadOrFollowExternalData() async throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let fm = FileManager.default
+        let framework = f.app.appendingPathComponent("Contents/Helpers/Doubao Browser.app/Contents/Frameworks/Doubao Browser Framework.framework")
+        try fm.createDirectory(at: framework, withIntermediateDirectories: true)
+        // Real app frameworks expose aliases before their versioned payload.
+        try fm.createSymbolicLink(atPath: framework.appendingPathComponent("Doubao Browser Framework").path,
+                                  withDestinationPath: "Versions/Current/Doubao Browser Framework")
+        for name in ["Resources", "Libraries", "Helpers"] {
+            try fm.createSymbolicLink(atPath: framework.appendingPathComponent(name).path,
+                                      withDestinationPath: "Versions/Current/" + name)
+        }
+        let versions = framework.appendingPathComponent("Versions")
+        try fm.createDirectory(at: versions, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(atPath: versions.appendingPathComponent("Current").path, withDestinationPath: "147.0.7727.149")
+        let payload = versions.appendingPathComponent("147.0.7727.149/Doubao Browser Framework")
+        try fm.createDirectory(at: payload.deletingLastPathComponent(), withIntermediateDirectories: true)
+        for name in ["Resources", "Libraries", "Helpers"] {
+            try fm.createDirectory(at: payload.deletingLastPathComponent().appendingPathComponent(name), withIntermediateDirectories: true)
+        }
+        try Data(repeating: 7, count: 2 * 1024 * 1024).write(to: payload)
+        let outside = f.root.appendingPathComponent("External.data")
+        try Data(repeating: 9, count: 8 * 1024 * 1024).write(to: outside)
+        try fm.createSymbolicLink(at: framework.appendingPathComponent("External"), withDestinationURL: outside)
+        let e = engine(f)
+        let inventory = await e.installedApplications()
+        let app = try XCTUnwrap(inventory.applications.first)
+        let related = await e.relatedFiles(for: app)
+        let reviewBytes = try XCTUnwrap(related.candidates.first { $0.category == .application }?.sizeBytes)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(app.sizeBytes), 2 * 1024 * 1024)
+        XCTAssertEqual(app.sizeBytes, reviewBytes)
+        XCTAssertLessThan(reviewBytes, 3 * 1024 * 1024, "Aliases and external targets must not be counted")
+    }
+
     func testRunningAppSkippedAndRecheckedBeforeTrash() async throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
@@ -117,6 +152,87 @@ final class CleanupEngineTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: outside.path))
     }
 
+    func testProtectedAppFailureOffersSystemRecoveryAndPreservesUserData() async throws {
+        let f = try fixture()
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: f.app.path)
+            try? FileManager.default.removeItem(at: f.root)
+        }
+        // A read-only app reproduces Cocoa 513 without changing a real app.
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: f.app.path)
+        let e = CleanupEngine(applicationRoots: [f.apps], libraryRoot: f.library,
+                              currentAppURL: nil, runningBundleIdentifiers: { [] })
+        let inventory = await e.installedApplications()
+        let review = await e.relatedFiles(for: try XCTUnwrap(inventory.applications.first))
+        let app = try XCTUnwrap(review.candidates.first { $0.category == .application })
+        let result = await e.moveToTrash([app])
+        XCTAssertTrue(result.moved.isEmpty)
+        XCTAssertEqual(result.failures.first?.recoveryURL?.path, f.app.path)
+        XCTAssertEqual(result.failures.first?.reason, "需要系统授权，请在 Finder 中继续卸载")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: f.app.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: f.cache.path))
+    }
+
+    func testFailedAppUninstallKeepsAssociatedFilesEvenWhenSelectedFirst() async throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let e = CleanupEngine(applicationRoots: [f.apps], libraryRoot: f.library,
+                              currentAppURL: nil, runningBundleIdentifiers: { [] }, trashMover: { url in
+            if url.pathExtension == "app" { throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError) }
+            let target = f.root.appendingPathComponent("moved-cache")
+            try FileManager.default.moveItem(at: url, to: target)
+            return target
+        })
+        let inventory = await e.installedApplications()
+        let review = await e.relatedFiles(for: try XCTUnwrap(inventory.applications.first))
+        let result = await e.moveToTrash(Array(review.candidates.reversed()))
+        XCTAssertTrue(result.moved.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: f.cache.path))
+        XCTAssertTrue(result.failures.contains { $0.reason == "应用卸载未完成，关联文件已保留" })
+    }
+
+    func testSystemUninstallRequiresExactAppInTrash() async throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let fm = FileManager.default
+        let e = engine(f)
+        let inventory = await e.installedApplications()
+        let review = await e.relatedFiles(for: try XCTUnwrap(inventory.applications.first))
+        let app = try XCTUnwrap(review.candidates.first { $0.category == .application })
+        let trash = f.root.appendingPathComponent("SystemTrash")
+        try fm.createDirectory(at: trash, withIntermediateDirectories: true)
+        let elsewhere = f.root.appendingPathComponent("Renamed.app")
+        try fm.moveItem(at: f.app, to: elsewhere)
+        XCTAssertNil(e.systemTrashDestination(for: app, trashDirectory: trash))
+        let impostor = trash.appendingPathComponent("Fixture.app")
+        try fm.copyItem(at: elsewhere, to: impostor)
+        XCTAssertNil(e.systemTrashDestination(for: app, trashDirectory: trash))
+        let real = trash.appendingPathComponent("Fixture 2.app")
+        try fm.moveItem(at: elsewhere, to: real)
+        XCTAssertEqual(e.systemTrashDestination(for: app, trashDirectory: trash)?.resolvingSymlinksInPath().path, real.resolvingSymlinksInPath().path)
+        try fm.moveItem(at: real, to: f.app)
+        XCTAssertNil(e.systemTrashDestination(for: app, trashDirectory: trash))
+    }
+
+    func testSystemUninstallWorksWhenTrashListingIsDenied() async throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let trash = f.root.appendingPathComponent("PrivateTrash")
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+        let restricted = TrashListingDeniedFileManager()
+        restricted.deniedPath = trash.path
+        let e = CleanupEngine(fileManager: restricted, applicationRoots: [f.apps], libraryRoot: f.library,
+                              currentAppURL: nil, runningBundleIdentifiers: { [] })
+        let inventory = await e.installedApplications()
+        let review = await e.relatedFiles(for: try XCTUnwrap(inventory.applications.first))
+        let app = try XCTUnwrap(review.candidates.first { $0.category == .application })
+        // Finder renames collisions. Resolve the scanned object, without listing Trash.
+        let renamed = trash.appendingPathComponent("Fixture 2.app")
+        try FileManager.default.moveItem(at: f.app, to: renamed)
+        XCTAssertEqual(e.systemTrashDestination(for: app, trashDirectory: trash)?.resolvingSymlinksInPath().path,
+                       renamed.resolvingSymlinksInPath().path)
+    }
+
     func testSuccessfulMoveRecordsOriginalAndTrashPaths() async throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
@@ -132,5 +248,14 @@ final class CleanupEngineTests: XCTestCase {
         let row = try JSONSerialization.jsonObject(with: Data(contentsOf: ledger)) as? [String: Any]
         XCTAssertEqual(row?["original"] as? String, f.cache.path)
         XCTAssertTrue((row?["trash"] as? String)?.contains("SimulatedTrash") == true)
+    }
+}
+
+private final class TrashListingDeniedFileManager: FileManager, @unchecked Sendable {
+    var deniedPath = ""
+    override func contentsOfDirectory(at url: URL, includingPropertiesForKeys keys: [URLResourceKey]?,
+                                      options mask: FileManager.DirectoryEnumerationOptions = []) throws -> [URL] {
+        if url.path == deniedPath { throw NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoPermissionError) }
+        return try super.contentsOfDirectory(at: url, includingPropertiesForKeys: keys, options: mask)
     }
 }

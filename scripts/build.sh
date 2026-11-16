@@ -23,7 +23,7 @@ import os, plistlib
 from pathlib import Path
 label='local.wesp.MacleanHelper';sha=os.environ['MACLEAN_SIGNING_IDENTITY'].upper()
 info={'CFBundleName':'WES·MACLEAN','CFBundleDisplayName':'WES·MACLEAN','CFBundleIdentifier':'local.wesp.Lime',
-      'CFBundleExecutable':'Lime','CFBundlePackageType':'APPL','CFBundleShortVersionString':'1.3.1','CFBundleVersion':'5',
+      'CFBundleExecutable':'Lime','CFBundlePackageType':'APPL','CFBundleShortVersionString':'1.3.2','CFBundleVersion':'6',
       'CFBundleIconFile':'Lime','LSMinimumSystemVersion':'13.0','LSUIElement':True,'NSHighResolutionCapable':True,
       'NSPrincipalClass':'NSApplication','NSHumanReadableCopyright':'WESP 2026',
       'SMPrivilegedExecutables':{label:f'anchor apple generic and identifier "{label}" and certificate leaf = H"{sha}"'}}
@@ -39,7 +39,7 @@ else
 fi
 codesign --verify --deep --strict "$LIME_APP"
 mkdir -p "$LIME_ROOT/dist"
-/usr/bin/ditto -c -k --keepParent "$LIME_APP" "$LIME_ROOT/dist/WES·MACLEAN-1.3.1-$(uname -m).zip"
+/usr/bin/ditto -c -k --keepParent "$LIME_APP" "$LIME_ROOT/dist/WES·MACLEAN-1.3.2-$(uname -m).zip"
 if [ -d "$LIME_ROOT/dist/WES·MACLEAN.app" ]; then
   rm -rf "$LIME_ROOT/dist/WES·MACLEAN.app"
 fi

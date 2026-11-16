@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.2
+
+- Count the complete app bundle when framework symlinks precede real version directories.
+- Show permission failures with a Finder recovery action and native authorization instructions.
+- Refresh the selected app when returning from a system uninstall.
+- Track the exact app through Finder renames without requesting access to list Trash.
+- Preserve selected related files when app removal fails, regardless of selection order.
+- Expand cleanup issues by default so failures are visible.
+
 ## 1.3.1
 
 - Recognize the fanless M1 MacBook Air.

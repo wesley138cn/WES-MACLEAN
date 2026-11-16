@@ -14,6 +14,7 @@ enum CleanupCategory: String, Codable, CaseIterable {
 struct CleanupIssue: Identifiable, Hashable {
     let path: String
     let reason: String
+    var recoveryURL: URL? = nil
     var id: String { path + ":" + reason }
 }
 
@@ -34,6 +35,7 @@ struct CleanupCandidate: Identifiable, Hashable {
     let bundleIdentifier: String
     let selectedByDefault: Bool
     fileprivate let identity: CleanupFileIdentity
+    fileprivate let bookmark: Data?
     var id: String { url.path }
 }
 
@@ -262,13 +264,24 @@ final class CleanupEngine {
         var failures: [CleanupIssue] = []
         var ledgerIssues: [CleanupIssue] = []
         var selected = Set<String>()
-        for candidate in candidates {
+        var blockedBundles = Set<String>()
+        // Attempt app removal before any of its selected data, regardless of UI order.
+        let ordered = candidates.enumerated().sorted {
+            let lhs = $0.element.category == .application ? 0 : 1
+            let rhs = $1.element.category == .application ? 0 : 1
+            return lhs == rhs ? $0.offset < $1.offset : lhs < rhs
+        }.map(\.element)
+        for candidate in ordered {
             if Task.isCancelled {
                 failures.append(CleanupIssue(path: candidate.url.path, reason: "操作已取消"))
                 break
             }
             if !selected.insert(candidate.url.standardizedFileURL.path).inserted {
                 failures.append(CleanupIssue(path: candidate.url.path, reason: "重复项目已跳过"))
+                continue
+            }
+            if candidate.category != .application && blockedBundles.contains(candidate.bundleIdentifier) {
+                failures.append(CleanupIssue(path: candidate.url.path, reason: "应用卸载未完成，关联文件已保留"))
                 continue
             }
             do {
@@ -279,10 +292,60 @@ final class CleanupEngine {
                 do { try appendLedger(item) }
                 catch { ledgerIssues.append(CleanupIssue(path: candidate.url.path, reason: "已移入废纸篓，记录失败：\(error.localizedDescription)")) }
             } catch {
-                failures.append(CleanupIssue(path: candidate.url.path, reason: error.localizedDescription))
+                if candidate.category == .application { blockedBundles.insert(candidate.bundleIdentifier) }
+                if candidate.category == .application && Self.isPermissionFailure(error) {
+                    failures.append(CleanupIssue(path: candidate.url.path,
+                                                 reason: "需要系统授权，请在 Finder 中继续卸载",
+                                                 recoveryURL: candidate.url))
+                } else {
+                    failures.append(CleanupIssue(path: candidate.url.path, reason: error.localizedDescription))
+                }
             }
         }
         return CleanupResult(moved: moved, failures: failures, ledgerIssues: ledgerIssues)
+    }
+
+    /// Finder can authorize protected app removal. Accept its result only when
+    /// the exact scanned directory is now in Trash, not merely missing at source.
+    func systemTrashDestination(for candidate: CleanupCandidate, trashDirectory: URL? = nil) -> URL? {
+        guard candidate.category == .application else { return nil }
+        var source = stat()
+        guard lstat(candidate.url.path, &source) != 0, errno == ENOENT else { return nil }
+        guard let trash = trashDirectory ?? (try? fm.url(for: .trashDirectory, in: .userDomainMask,
+                                                        appropriateFor: candidate.url.deletingLastPathComponent(), create: false)),
+              let rootIdentity = try? fileIdentity(trash),
+              (rootIdentity.mode & UInt16(S_IFMT)) == UInt16(S_IFDIR) else { return nil }
+        // Listing Trash requires privacy access that normal app removal does not.
+        // A bookmark follows this one object, including Finder's collision rename.
+        var destinations = [trash.appendingPathComponent(candidate.url.lastPathComponent)]
+        if let bookmark = candidate.bookmark {
+            var stale = false
+            if let resolved = try? URL(resolvingBookmarkData: bookmark, options: [.withoutUI, .withoutMounting],
+                                       relativeTo: nil, bookmarkDataIsStale: &stale) {
+                destinations.insert(resolved, at: 0)
+            }
+        }
+        for url in destinations where url.pathExtension.lowercased() == "app" {
+            guard url.deletingLastPathComponent().resolvingSymlinksInPath().path == trash.resolvingSymlinksInPath().path else { continue }
+            guard let identity = try? fileIdentity(url),
+                  identity.device == candidate.identity.device,
+                  identity.inode == candidate.identity.inode,
+                  (identity.mode & UInt16(S_IFMT)) == UInt16(S_IFDIR),
+                  Bundle(url: url)?.bundleIdentifier == candidate.bundleIdentifier else { continue }
+            return url
+        }
+        return nil
+    }
+
+    private static func isPermissionFailure(_ error: Error) -> Bool {
+        var current = error as NSError
+        for _ in 0..<5 {
+            if current.domain == NSCocoaErrorDomain && [NSFileWriteNoPermissionError, NSFileReadNoPermissionError].contains(current.code) { return true }
+            if current.domain == NSPOSIXErrorDomain && [Int(EACCES), Int(EPERM)].contains(current.code) { return true }
+            guard let next = current.userInfo[NSUnderlyingErrorKey] as? NSError else { break }
+            current = next
+        }
+        return false
     }
 
     private func readApplication(_ url: URL, running: Set<String>) -> InstalledApplication? {
@@ -306,7 +369,10 @@ final class CleanupEngine {
                                 sizeBytes: measuredSize(url),
                                 bundleIdentifier: bundleID,
                                 selectedByDefault: selected,
-                                identity: identity)
+                                identity: identity,
+                                bookmark: category == .application
+                                    ? try? url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
+                                    : nil)
     }
 
     private func validate(_ candidate: CleanupCandidate, running: Set<String>) throws {
@@ -419,7 +485,9 @@ final class CleanupEngine {
                 continue
             }
             guard let values = try? member.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey, .totalFileAllocatedSizeKey, .fileSizeKey]) else { hadError = true; continue }
-            if values.isSymbolicLink == true { enumerator.skipDescendants(); continue }
+            // DirectoryEnumerator already skips symlink targets. Calling
+            // skipDescendants() here can skip the next real sibling directory.
+            if values.isSymbolicLink == true { continue }
             if values.isRegularFile == true {
                 bytes &+= UInt64(values.totalFileAllocatedSize ?? values.fileSize ?? 0)
             }

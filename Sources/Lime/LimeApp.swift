@@ -90,7 +90,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         window.contentView = NSHostingView(rootView: MainView(model: model))
         window.center()
         model.monitor.$snapshot.sink { [weak self] _ in
-            DispatchQueue.main.async { self?.updateTitle() }
+            DispatchQueue.main.async {
+                self?.updateTitle()
+                self?.model.refreshSystemUninstallStatus()
+            }
         }.store(in: &cancellables)
         NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification).sink { [weak self] _ in
             DispatchQueue.main.async { self?.updateTitle() }
@@ -100,6 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if !CommandLine.arguments.contains("--background") { showWindow() }
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showWindow(); return true }
+    func applicationDidBecomeActive(_ notification: Notification) { model.refreshSystemUninstallStatus() }
     func applicationWillTerminate(_ notification: Notification) { model.monitor.stop(); processTimer?.invalidate() }
     func showWindow() { NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil) }
     @objc func togglePopover() {
@@ -156,6 +160,11 @@ func bytes(_ value: UInt64?) -> String {
     if value == 0 { return "0 KB" }
     return ByteCountFormatter.string(fromByteCount: Int64(min(value, UInt64(Int64.max))), countStyle: .binary)
 }
+func storageBytes(_ value: UInt64?) -> String {
+    guard let value else { return "—" }
+    if value == 0 { return "0 KB" }
+    return ByteCountFormatter.string(fromByteCount: Int64(min(value, UInt64(Int64.max))), countStyle: .decimal)
+}
 func pct(_ value: Double?) -> String { value.map { String(format: "%.0f%%", $0) } ?? "—" }
 func rate(_ value: Double?) -> String { value.map { bytes(UInt64(max(0, min($0, Double(Int64.max))))) + "/s" } ?? "—" }
 
@@ -191,12 +200,14 @@ final class AppModel: ObservableObject {
     @Published var processError = ""
     @Published var memoryActionStatus = ""
     @Published var search = ""
+    private var pendingSystemUninstall: CleanupCandidate?
     private var processWork: Task<Void, Never>?
     private var work: Task<Void, Never>?
     var selectedBytes: UInt64 { candidates.filter { selection.contains($0.id) }.reduce(0) { $0 + ($1.sizeBytes ?? 0) } }
     var selectedCandidates: [CleanupCandidate] { candidates.filter { selection.contains($0.id) } }
     func scanApps() {
         guard !busy else { return }
+        pendingSystemUninstall = nil
         busy = true; status = "正在读取应用列表…"; selectedApp = nil; candidates = []; issues = []
         work = Task {
             let result = await cleaner.installedApplications()
@@ -206,6 +217,7 @@ final class AppModel: ObservableObject {
     }
     func inspect(_ app: InstalledApplication) {
         guard !busy else { return }
+        pendingSystemUninstall = nil
         selectedApp = app; busy = true; status = "正在查找关联文件…"
         work = Task {
             let result = await cleaner.relatedFiles(for: app)
@@ -214,6 +226,7 @@ final class AppModel: ObservableObject {
     }
     func scanJunk() {
         guard !busy else { return }
+        pendingSystemUninstall = nil
         selectedApp = nil; busy = true; status = "正在扫描缓存与日志…"; candidates = []; issues = []
         work = Task {
             let result = await cleaner.scanJunk()
@@ -230,7 +243,7 @@ final class AppModel: ObservableObject {
         guard !busy, !items.isEmpty else { return }
         let alert = NSAlert()
         alert.messageText = "移入废纸篓？"
-        alert.informativeText = "已选 \(items.count) 项，约 \(bytes(selectedBytes))。\n包含应用数据时，设置和本地资料也会移走。\n可在 Finder 废纸篓中放回。"
+        alert.informativeText = "已选 \(items.count) 项，约 \(storageBytes(selectedBytes))。\n包含应用数据时，设置和本地资料也会移走。\n可在 Finder 废纸篓中放回。"
         alert.alertStyle = .warning
         alert.addButton(withTitle: "移入废纸篓"); alert.addButton(withTitle: "取消")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -241,11 +254,39 @@ final class AppModel: ObservableObject {
             candidates.removeAll { done.contains($0.id) }; selection.subtract(done)
             apps.removeAll { done.contains($0.id) }
             issues = result.failures + result.ledgerIssues
-            status = "已移走 \(result.moved.count) 项（\(bytes(result.totalBytes))）"
+            status = "已移走 \(result.moved.count) 项（\(storageBytes(result.totalBytes))）"
             if !result.failures.isEmpty { status += "，\(result.failures.count) 项未移动" }
-            status += "。清空废纸篓后释放磁盘空间。"
+            status += result.moved.isEmpty
+                ? "。未移走任何项目，请查看提示。"
+                : "。清空废纸篓后释放磁盘空间。"
             busy = false; monitor.refresh()
         }
+    }
+    func continueUninstallInFinder(_ url: URL) {
+        guard !busy,
+              let candidate = candidates.first(where: { $0.category == .application && $0.url.path == url.path }),
+              issues.contains(where: { $0.recoveryURL?.path == url.path }) else { return }
+        pendingSystemUninstall = candidate
+        status = "在 Finder 按 ⌘⌫，按系统提示授权"
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+    func refreshSystemUninstallStatus() {
+        guard !busy, let candidate = pendingSystemUninstall else { return }
+        guard page == .uninstall, selectedApp?.url.path == candidate.url.path else {
+            pendingSystemUninstall = nil; return
+        }
+        guard cleaner.systemTrashDestination(for: candidate) != nil else { return }
+        pendingSystemUninstall = nil
+        let path = candidate.url.path
+        apps.removeAll { $0.url.path == path }
+        candidates.removeAll { $0.url.path == path }
+        selection.remove(path)
+        let relatedPaths = Set(candidates.filter { $0.bundleIdentifier == candidate.bundleIdentifier }.map(\.id))
+        issues.removeAll { $0.path == path || (relatedPaths.contains($0.path) && $0.reason == "应用卸载未完成，关联文件已保留") }
+        status = "已确认应用移入废纸篓"
+        if candidates.isEmpty { selectedApp = nil }
+        else { status += "，请继续核对关联文件" }
+        monitor.refresh()
     }
     func refreshProcesses() {
         guard !processesLoading else { return }

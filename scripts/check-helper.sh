@@ -17,7 +17,7 @@ codesign --force --sign "$MACLEAN_SIGNING_IDENTITY" --timestamp=none --options r
 codesign --force --sign - --options runtime --identifier local.wesp.Lime "$MACLEAN_TEST_STAGE/probe"
 "$MACLEAN_TEST_STAGE/probe" --expect-rejection
 # Inspect the clean archive, rather than the FileProvider-managed Desktop copy.
-ditto -x -k "$MACLEAN_ROOT/dist/WES·MACLEAN-1.3.1-$(uname -m).zip" "$MACLEAN_TEST_STAGE"
+ditto -x -k "$MACLEAN_ROOT/dist/WES·MACLEAN-1.3.2-$(uname -m).zip" "$MACLEAN_TEST_STAGE"
 MACLEAN_CHECK_APP="$MACLEAN_TEST_STAGE/WES·MACLEAN.app"
 codesign --verify --deep --strict "$MACLEAN_CHECK_APP"
 codesign --verify --strict -R="anchor apple generic and identifier \"local.wesp.Lime\" and certificate leaf = H\"$MACLEAN_SIGNING_IDENTITY\"" "$MACLEAN_CHECK_APP"
