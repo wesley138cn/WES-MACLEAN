@@ -6,7 +6,7 @@ permissions:
   contents: read
 jobs:
   build-and-test:
-    runs-on: macos-15
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - name: Configure development build
